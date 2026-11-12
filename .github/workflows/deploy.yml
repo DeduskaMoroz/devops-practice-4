@@ -13,48 +13,68 @@ jobs:
     runs-on: self-hosted
     defaults:
       run:
-        # Форсируем bash, чтобы linux-скрипты из методички работали на твоем Windows-раннере
-        shell: bash 
+        shell: bash
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Create .env file from secrets
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          APP_PORT: ${{ secrets.APP_PORT }}
+          APP_SECRET: ${{ secrets.APP_SECRET }}
+          API_KEY: ${{ secrets.API_KEY }}
         run: |
-          echo "Creating env file from GitHub Secrets..."
-          cat > .env << EOF
-          # Database configuration
-          DB_HOST=${{ secrets.DB_HOST }}
-          DB_PORT=${{ secrets.DB_PORT }}
-          DB_NAME=${{ secrets.DB_NAME }}
-          DB_USER=${{ secrets.DB_USER }}
-          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-          # Application configuration
-          APP_PORT=${{ secrets.APP_PORT }}
-          APP_SECRET=${{ secrets.APP_SECRET }}
-          API_KEY=${{ secrets.API_KEY }}
-          # Docker configuration
-          COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}
-          EOF
+          echo "Creating .env file from GitHub Secrets..."
+          {
+            echo "DB_HOST=$DB_HOST"
+            echo "DB_PORT=$DB_PORT"
+            echo "DB_NAME=$DB_NAME"
+            echo "DB_USER=$DB_USER"
+            echo "DB_PASSWORD=$DB_PASSWORD"
+            echo "APP_PORT=$APP_PORT"
+            echo "APP_SECRET=$APP_SECRET"
+            echo "API_KEY=$API_KEY"
+            echo "COMPOSE_PROJECT_NAME=${{ env.COMPOSE_PROJECT_NAME }}"
+          } > .env
+
+          sed 's/=.*/=***/' .env > env-masked.txt
+
           echo ".env file created successfully"
           echo "Contents (masked):"
-          cat .env | sed 's/=.*/=***/'
+          cat env-masked.txt
 
       - name: Deploy with Docker Compose
         run: |
           echo "Starting application stack..."
           docker compose up -d
+
           echo "Waiting for services to start..."
-          sleep 30
+          for i in {1..10}; do
+            if curl -fsS http://localhost:${{ secrets.APP_PORT }}/health > /dev/null 2>&1; then
+              echo "Web application is up"
+              break
+            fi
+            sleep 3
+          done
+
           echo "Checking container status..."
           docker compose ps
 
       - name: Verify containers are running
         run: |
-          if docker compose ps | grep -q "Up"; then
-            echo "All containers are running"
+          RUNNING=$(docker compose ps --services --filter "status=running" | wc -l)
+          TOTAL=$(docker compose config --services | wc -l)
+
+          if [ "$RUNNING" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+            echo "All containers are running ($RUNNING/$TOTAL)"
           else
-            echo "X Some containers failed to start"
+            echo "X Some containers failed to start ($RUNNING/$TOTAL)"
             docker compose logs
             exit 1
           fi
@@ -62,64 +82,70 @@ jobs:
       - name: Run application tests
         run: |
           echo "Running application tests..."
+
           echo "1. Testing application and database connectivity..."
-          
-          if curl -f http://localhost:${{ secrets.APP_PORT }}/health; then
-            echo " Web application is healthy"
+
+          if curl -fsS http://localhost:${{ secrets.APP_PORT }}/health > /dev/null; then
+            echo "Web application is healthy"
           else
             echo "X Web application health check failed"
             exit 1
           fi
-          
-          API_RESPONSE=$(curl -s http://localhost:${{ secrets.APP_PORT }}/api/data)
-          if [ $? -eq 0 ]; then
-            echo " Application database connection working"
+
+          if API_RESPONSE=$(curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/data); then
+            echo "Application database connection working"
           else
             echo "X Application database connection failed"
             exit 1
           fi
-          
+
           echo "2. Testing data consistency..."
-          DB_COUNT=$(docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" | tr -d ' ' || echo "0")
-          WEB_COUNT=$(curl -s http://localhost:${{ secrets.APP_PORT }}/api/items/count)
-          
+
+          DB_COUNT=$(docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" 2>/dev/null | tr -d '[:space:]' || echo "FAIL")
+          WEB_COUNT=$(curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/items/count | tr -d '[:space:]' || echo "FAIL")
+
+          echo "DB_COUNT=$DB_COUNT" >> "$GITHUB_ENV"
+          echo "WEB_COUNT=$WEB_COUNT" >> "$GITHUB_ENV"
+
           echo "Database count: $DB_COUNT"
           echo "Web API count: $WEB_COUNT"
-          
-          if [ "$DB_COUNT" = "$WEB_COUNT" ]; then
-            echo " Data consistency test passed"
+
+          if [ "$DB_COUNT" = "FAIL" ] || [ "$WEB_COUNT" = "FAIL" ]; then
+            echo "X Failed to fetch data for comparison"
+            exit 1
+          elif [ "$DB_COUNT" = "$WEB_COUNT" ]; then
+            echo "Data consistency test passed"
           else
             echo "X Data consistency test failed"
             exit 1
           fi
 
       - name: Create test report
+        if: always()
         run: |
           echo "Creating test report..."
           cat > test-report.md << EOF
           # Deployment Test Report
           Date: $(date)
-          Application: Healthy
-          Database: Connected
-          Data Consistency: Passed
-          Containers: Running
-          
+          Job Status: ${{ job.status }}
+
           ## Environment Variables
           - DB_HOST: ${{ secrets.DB_HOST }}
           - DB_NAME: ${{ secrets.DB_NAME }}
           - APP_PORT: ${{ secrets.APP_PORT }}
-          
+
           ## Test Results
-          Database records: $DB_COUNT
-          Web API records: $WEB_COUNT
+          Database records: ${DB_COUNT:-N/A}
+          Web API records: ${WEB_COUNT:-N/A}
           EOF
 
       - name: Save artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: deployment-artifacts
           path: |
-            .env
+            env-masked.txt
             test-report.md
           retention-days: 30
 
@@ -146,8 +172,13 @@ jobs:
         if: always()
         run: |
           echo "Deployment Summary"
-          echo "Self-Hosted Runner: Active"
-          echo "Docker Compose: Running"
-          echo "Secrets & Artifacts: Configured"
-          echo "Application Tests: Passed"
-          echo "Total score: 10/10"
+          echo "Job Status: ${{ job.status }}"
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "Self-Hosted Runner: Active"
+            echo "Docker Compose: Running"
+            echo "Secrets & Artifacts: Configured"
+            echo "Application Tests: Passed"
+            echo "Total score: 10/10"
+          else
+            echo "Pipeline failed, please check logs."
+          fi
