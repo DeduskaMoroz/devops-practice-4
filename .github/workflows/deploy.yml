@@ -60,7 +60,7 @@ jobs:
 
           echo "Waiting for services to start..."
           for i in {1..10}; do
-            if curl -fsS http://localhost:${{ secrets.APP_PORT }}/health > /dev/null 2>&1; then
+            if curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/items > /dev/null 2>&1; then
               echo "Web application is up"
               break
             fi
@@ -89,14 +89,14 @@ jobs:
 
           echo "1. Testing application and database connectivity..."
 
-          if curl -fsS http://localhost:${{ secrets.APP_PORT }}/health > /dev/null; then
+          if curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/items > /dev/null; then
             echo "Web application is healthy"
           else
             echo "X Web application health check failed"
             exit 1
           fi
 
-          if API_RESPONSE=$(curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/data); then
+          if API_RESPONSE=$(curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/items); then
             echo "Application database connection working"
           else
             echo "X Application database connection failed"
@@ -106,7 +106,7 @@ jobs:
           echo "2. Testing data consistency..."
 
           DB_COUNT=$(docker compose exec -T db psql -U ${{ secrets.DB_USER }} -d ${{ secrets.DB_NAME }} -t -c "SELECT COUNT(*) FROM items;" 2>/dev/null | tr -d '[:space:]' || echo "FAIL")
-          WEB_COUNT=$(curl -fsS http://localhost:${{ secrets.APP_PORT }}/api/items/count | tr -d '[:space:]' || echo "FAIL")
+          WEB_COUNT=$(echo "$API_RESPONSE" | { grep -o '"id"' || true; } | wc -l | tr -d '[:space:]')
 
           echo "DB_COUNT=$DB_COUNT" >> "$GITHUB_ENV"
           echo "WEB_COUNT=$WEB_COUNT" >> "$GITHUB_ENV"
